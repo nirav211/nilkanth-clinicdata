@@ -4,6 +4,7 @@
 // and redirects to /login on 401 Unauthorized responses.
 
 import axios from 'axios';
+import { formatDateTime } from '../components/DateText';
 
 const API_BASE = typeof window !== 'undefined' ? '/api' : (process.env.API_URL || 'http://127.0.0.1:5000/api');
 const AUTH_KEY = 'nilkanth_clinic_auth_v1';
@@ -75,6 +76,9 @@ function normalizePatient(p, idx = 0) {
     ? Number(p.reportRemaining)
     : Math.max(0, reportCharge - reportPaid);
 
+  const lastPaymentAt = p.lastPaymentAt ? (typeof p.lastPaymentAt === 'string' ? p.lastPaymentAt : new Date(p.lastPaymentAt).toISOString()) : null;
+  const lastPaymentAtLabel = p.lastPaymentAtLabel || (lastPaymentAt ? formatDateTime(lastPaymentAt) : '');
+
   return {
     ...p,
     id: String(id),
@@ -89,6 +93,8 @@ function normalizePatient(p, idx = 0) {
     reportPaid,
     reportRemaining,
     totalRemaining: opdRemaining + reportRemaining,
+    lastPaymentAt,
+    lastPaymentAtLabel,
     medicines: (p.medicines || []).map(m => ({
       name: m.name || m.medicine || '',
       medicine: m.medicine || m.name || '',
@@ -182,7 +188,8 @@ export async function createPatient(patientData) {
     reportName: patientData.reportName || '',
     reportCharge,
     reportPaid,
-    visitDate: patientData.visitDate || new Date().toISOString()
+    visitDate: patientData.visitDate || new Date().toISOString(),
+    paymentMode: patientData.paymentMode || patientData.mode || 'cash'
   };
 
   try {
@@ -218,14 +225,30 @@ export async function listPatients(params = {}) {
 
 /**
  * 4. getPatient
+ * Returns patient with payments sorted newest first, with paidAt & paidAtLabel
  */
 export async function getPatient(id) {
   try {
     const res = await api.get(`/patients/${id}`);
     const normalized = normalizePatient(res.data);
+    const payments = (res.data.payments || []).map(pm => {
+      const pDate = pm.paidAt || pm.date || pm.createdAt;
+      return {
+        ...pm,
+        id: pm.id || pm._id,
+        _id: pm._id || pm.id,
+        amount: Number(pm.amount) || 0,
+        type: pm.type || 'opd',
+        mode: pm.mode || 'cash',
+        note: pm.note || '',
+        paidAt: pDate ? new Date(pDate).toISOString() : '',
+        paidAtLabel: pm.paidAtLabel || (pDate ? formatDateTime(pDate) : '—')
+      };
+    });
+
     return {
       ...normalized,
-      payments: res.data.payments || []
+      payments
     };
   } catch (err) {
     const msg = err.response?.data?.error || err.message || 'Patient record not found.';
@@ -235,14 +258,28 @@ export async function getPatient(id) {
 
 /**
  * 5. addPayment
+ * Accepts amount, type, mode, note, optional paidAt
  */
 export async function addPayment(patientId, paymentData) {
   try {
     const res = await api.post(`/patients/${patientId}/payments`, paymentData);
     const data = res.data;
+    const pm = data.payment || {};
+    const pDate = pm.paidAt || pm.date || pm.createdAt;
+
     return {
       patient: normalizePatient(data.patient),
-      payment: data.payment
+      payment: {
+        ...pm,
+        id: pm.id || pm._id,
+        _id: pm._id || pm.id,
+        amount: Number(pm.amount) || 0,
+        type: pm.type || 'opd',
+        mode: pm.mode || 'cash',
+        note: pm.note || '',
+        paidAt: pDate ? new Date(pDate).toISOString() : '',
+        paidAtLabel: pm.paidAtLabel || (pDate ? formatDateTime(pDate) : '—')
+      }
     };
   } catch (err) {
     const msg = err.response?.data?.error || err.message || 'Payment recording failed.';
@@ -271,6 +308,7 @@ export async function reportOpd(params = {}) {
       opdCharge: p.opdCharge !== undefined ? p.opdCharge : (p.charge || 0),
       opdPaid: p.opdPaid !== undefined ? p.opdPaid : (p.paid || 0),
       opdRemaining: p.opdRemaining !== undefined ? p.opdRemaining : (p.remaining || 0),
+      daysPending: p.daysPending !== undefined ? p.daysPending : 0,
       status: p.status || ((p.opdRemaining || p.remaining) === 0 ? 'Settled' : ((p.opdPaid || p.paid) > 0 ? 'Partial' : 'Pending'))
     }));
 
@@ -300,7 +338,6 @@ export async function reportOpd(params = {}) {
  */
 export async function reportCharge(params = {}) {
   try {
-    // Call /reports/report-charge
     const res = await api.get('/reports/report-charge', { params });
     const data = res.data;
     const normalizedItems = (data.patients || data.items || []).map((p, idx) => ({
@@ -318,6 +355,7 @@ export async function reportCharge(params = {}) {
       reportCharge: p.reportCharge !== undefined ? p.reportCharge : (p.charge || 0),
       reportPaid: p.reportPaid !== undefined ? p.reportPaid : (p.paid || 0),
       reportRemaining: p.reportRemaining !== undefined ? p.reportRemaining : (p.remaining || 0),
+      daysPending: p.daysPending !== undefined ? p.daysPending : 0,
       status: p.status || ((p.reportRemaining || p.remaining) === 0 ? 'Settled' : ((p.reportPaid || p.paid) > 0 ? 'Partial' : 'Pending'))
     }));
 
@@ -359,7 +397,6 @@ export async function reportCombined(params = {}) {
       totalCharge: 0
     };
 
-    // Format rows for table view
     const items = dates.map((d, idx) => ({
       ...d,
       token: idx + 1,
@@ -390,8 +427,39 @@ export async function reportCombined(params = {}) {
   }
 }
 
+/**
+ * 9. reportPayments
+ * Payments received report with totals by day, by mode and grand total
+ */
+export async function reportPayments(params = {}) {
+  try {
+    const res = await api.get('/reports/payments', { params });
+    const data = res.data;
+    const payments = (data.payments || data.items || []).map(p => ({
+      ...p,
+      id: p.id || p._id,
+      paidAtLabel: p.paidAtLabel || (p.paidAt ? formatDateTime(p.paidAt) : '—')
+    }));
+
+    return {
+      payments,
+      items: payments,
+      totals: data.totals || {
+        byDay: [],
+        byType: { opd: 0, report: 0 },
+        byMode: { cash: 0, upi: 0, card: 0, other: 0 },
+        grandTotal: { totalAmount: 0, totalCount: 0 }
+      },
+      grandTotal: data.grandTotal || { totalAmount: 0, totalCount: 0 }
+    };
+  } catch (err) {
+    const msg = err.response?.data?.error || err.message || 'Could not load payments report.';
+    throw new Error(msg);
+  }
+}
+
 export function resetMockData() {
-  // Real API active - mock reset is no-op
+  // Production real API active
 }
 
 export default {
@@ -406,5 +474,6 @@ export default {
   reportOpd,
   reportCharge,
   reportCombined,
+  reportPayments,
   resetMockData
 };

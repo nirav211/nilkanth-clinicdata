@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { getCurrentUser, reportOpd, reportCharge, reportCombined, addPayment } from '../api/mockApi';
+import { getCurrentUser, reportOpd, reportCharge, reportCombined, reportPayments, addPayment } from '../api/mockApi';
 import PageHeader from '../components/PageHeader';
 import DataTable from '../components/DataTable';
 import Money from '../components/Money';
-import DateText from '../components/DateText';
+import DateText, { DateTimeText } from '../components/DateText';
 import StatusText from '../components/StatusText';
 import Input from '../components/Input';
 import Button from '../components/Button';
@@ -14,8 +14,10 @@ export function FinalReport() {
   const { showToast } = useToast();
   const user = getCurrentUser();
 
-  const [activeTab, setActiveTab] = useState('opd'); // 'opd', 'charge', 'combined'
+  const [activeTab, setActiveTab] = useState('opd'); // 'opd', 'charge', 'combined', 'payments'
   const [dateFilter, setDateFilter] = useState('');
+  const [fromDate, setFromDate] = useState('');
+  const [toDate, setToDate] = useState('');
   const [loading, setLoading] = useState(true);
   const [reportData, setReportData] = useState({ items: [], totals: { charge: 0, paid: 0, remaining: 0 } });
 
@@ -31,8 +33,10 @@ export function FinalReport() {
         res = await reportOpd({ date: dateFilter });
       } else if (activeTab === 'charge') {
         res = await reportCharge({ date: dateFilter });
-      } else {
+      } else if (activeTab === 'combined') {
         res = await reportCombined({ date: dateFilter });
+      } else {
+        res = await reportPayments({ from: fromDate, to: toDate });
       }
       setReportData(res);
     } catch (e) {
@@ -44,7 +48,7 @@ export function FinalReport() {
 
   useEffect(() => {
     loadReport();
-  }, [activeTab, dateFilter]);
+  }, [activeTab, dateFilter, fromDate, toDate]);
 
   const handleInlineAmountChange = (patientId, val) => {
     setInlineAmounts(prev => ({ ...prev, [patientId]: val }));
@@ -147,6 +151,16 @@ export function FinalReport() {
       )
     },
     {
+      title: 'Days pending',
+      key: 'daysPending',
+      align: 'right',
+      render: (r) => (
+        <span className="font-mono text-13 text-muted">
+          {r.remaining > 0 ? `${r.daysPending || 0}d` : '—'}
+        </span>
+      )
+    },
+    {
       title: 'Status',
       key: 'status',
       align: 'center',
@@ -240,6 +254,16 @@ export function FinalReport() {
       render: (r) => (
         <span className={r.remaining > 0 ? 'text-amber font-mono font-medium' : 'text-muted font-mono'}>
           <Money amount={r.remaining} />
+        </span>
+      )
+    },
+    {
+      title: 'Days pending',
+      key: 'daysPending',
+      align: 'right',
+      render: (r) => (
+        <span className="font-mono text-13 text-muted">
+          {r.remaining > 0 ? `${r.daysPending || 0}d` : '—'}
         </span>
       )
     },
@@ -354,7 +378,77 @@ export function FinalReport() {
     }
   ];
 
+  // Columns for Payments Received Tab
+  const paymentColumns = [
+    {
+      title: 'Date and time',
+      key: 'paidAt',
+      width: '170px',
+      render: (r) => (
+        <span className="font-mono text-11 text-ink">
+          {r.paidAtLabel || <DateTimeText date={r.paidAt} />}
+        </span>
+      )
+    },
+    {
+      title: 'Patient',
+      key: 'patientName',
+      render: (r) => (
+        <div>
+          <span className="font-medium text-ink block">{r.patientName || r.name}</span>
+          <span className="font-mono text-11 text-muted">{r.phone}</span>
+        </div>
+      )
+    },
+    {
+      title: 'For',
+      key: 'type',
+      render: (r) => (
+        <span className="text-13 text-ink">
+          {r.type === 'opd' ? 'OPD charge' : 'Report charge'}
+          {r.note && <span className="text-muted text-11 ml-1.5 font-sans">({r.note})</span>}
+        </span>
+      )
+    },
+    {
+      title: 'Amount',
+      key: 'amount',
+      align: 'right',
+      render: (r) => (
+        <span className="font-mono font-semibold text-brand">
+          <Money amount={r.amount} />
+        </span>
+      )
+    },
+    {
+      title: 'Mode',
+      key: 'mode',
+      align: 'center',
+      render: (r) => (
+        <span className="text-11 font-mono uppercase bg-paper px-2 py-0.5 rounded border border-hairline text-ink">
+          {r.mode || 'cash'}
+        </span>
+      )
+    }
+  ];
+
   const getFooterRow = () => {
+    if (activeTab === 'payments') {
+      const grandAmount = totals.grandTotal?.totalAmount !== undefined
+        ? totals.grandTotal.totalAmount
+        : items.reduce((s, p) => s + (p.amount || 0), 0);
+      return (
+        <>
+          <td colSpan={3} className="px-3 py-2 text-13 font-semibold text-ink">
+            Totals ({items.length} {items.length === 1 ? 'payment' : 'payments'})
+          </td>
+          <td className="px-3 py-2 text-right font-mono font-semibold text-brand">
+            <Money amount={grandAmount} />
+          </td>
+          <td></td>
+        </>
+      );
+    }
     if (activeTab === 'opd') {
       return (
         <>
@@ -452,41 +546,106 @@ export function FinalReport() {
         }
       />
 
-      {/* Ruled Summary (Requirement: three totals at top: charge, paid, remaining as a ruled summary, not coloured cards) */}
-      <div className="bg-surface border border-hairline rounded-[6px] p-4 sm:p-6 shadow-card">
-        <div className="text-13 font-semibold text-brand tracking-tight mb-3">
-          Ruled ledger balance summary — {activeTab === 'opd' ? 'OPD charge' : activeTab === 'charge' ? 'Report charge' : 'Combined'}
-        </div>
-        <div className="grid grid-cols-1 sm:grid-cols-3 divide-y sm:divide-y-0 sm:divide-x divide-hairline">
-          <div className="py-2 sm:py-0 sm:pr-6">
-            <span className="text-13 text-muted block mb-1">Total charge</span>
-            <div className="text-22 sm:text-28 font-mono font-semibold text-ink tracking-tight">
-              <Money amount={totals.charge} />
-            </div>
-            <span className="text-13 text-muted mt-0.5 block">Total billed across records</span>
+      {/* Ruled Summary */}
+      {activeTab === 'payments' ? (
+        <div className="bg-surface border border-hairline rounded-[6px] p-4 sm:p-6 shadow-card space-y-4">
+          <div className="text-13 font-semibold text-brand tracking-tight">
+            Ruled payment collections summary — by mode and day
           </div>
 
-          <div className="py-2 sm:py-0 sm:px-6">
-            <span className="text-13 text-muted block mb-1">Total paid</span>
-            <div className="text-22 sm:text-28 font-mono font-semibold text-brand tracking-tight">
-              <Money amount={totals.paid} />
+          <div className="grid grid-cols-1 sm:grid-cols-4 divide-y sm:divide-y-0 sm:divide-x divide-hairline">
+            <div className="py-2 sm:py-0 sm:pr-4">
+              <span className="text-13 text-muted block mb-1">Cash</span>
+              <div className="text-20 sm:text-24 font-mono font-semibold text-brand">
+                <Money amount={totals.byMode?.cash || 0} />
+              </div>
+              <span className="text-11 text-muted mt-0.5 block">Counter collections</span>
             </div>
-            <span className="text-13 text-muted mt-0.5 block">Collected at counter & UPI</span>
+
+            <div className="py-2 sm:py-0 sm:px-4">
+              <span className="text-13 text-muted block mb-1">UPI</span>
+              <div className="text-20 sm:text-24 font-mono font-semibold text-brand">
+                <Money amount={totals.byMode?.upi || 0} />
+              </div>
+              <span className="text-11 text-muted mt-0.5 block">Digital QR / VPA</span>
+            </div>
+
+            <div className="py-2 sm:py-0 sm:px-4">
+              <span className="text-13 text-muted block mb-1">Card / Other</span>
+              <div className="text-20 sm:text-24 font-mono font-semibold text-ink">
+                <Money amount={(totals.byMode?.card || 0) + (totals.byMode?.other || 0)} />
+              </div>
+              <span className="text-11 text-muted mt-0.5 block">POS & other modes</span>
+            </div>
+
+            <div className="py-2 sm:py-0 sm:pl-4">
+              <span className="text-13 text-muted block mb-1">Grand total</span>
+              <div className="text-20 sm:text-24 font-mono font-semibold text-brand">
+                <Money amount={totals.grandTotal?.totalAmount !== undefined ? totals.grandTotal.totalAmount : items.reduce((s, p) => s + (p.amount || 0), 0)} />
+              </div>
+              <span className="text-11 text-muted mt-0.5 block">
+                {totals.grandTotal?.totalCount !== undefined ? totals.grandTotal.totalCount : items.length} payments recorded
+              </span>
+            </div>
           </div>
 
-          <div className="py-2 sm:py-0 sm:pl-6">
-            <span className="text-13 text-muted block mb-1">Total remaining</span>
-            <div className="text-22 sm:text-28 font-mono font-semibold text-amber tracking-tight">
-              <Money amount={totals.remaining} />
+          {totals.byDay && totals.byDay.length > 0 && (
+            <div className="pt-3 border-t border-hairline">
+              <div className="text-11 font-medium text-muted uppercase tracking-wider mb-2">
+                Totals by day (Asia/Kolkata)
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {totals.byDay.map(d => (
+                  <div key={d.date} className="bg-paper p-2 rounded border border-hairline text-13">
+                    <span className="font-mono text-11 text-muted block">{d.date}</span>
+                    <span className="font-mono font-semibold text-brand">
+                      <Money amount={d.amount} />
+                    </span>
+                    <span className="text-11 text-muted ml-1">
+                      ({d.count} {d.count === 1 ? 'payment' : 'payments'})
+                    </span>
+                  </div>
+                ))}
+              </div>
             </div>
-            <span className="text-13 text-muted mt-0.5 block">Outstanding balance</span>
+          )}
+        </div>
+      ) : (
+        <div className="bg-surface border border-hairline rounded-[6px] p-4 sm:p-6 shadow-card">
+          <div className="text-13 font-semibold text-brand tracking-tight mb-3">
+            Ruled ledger balance summary — {activeTab === 'opd' ? 'OPD charge' : activeTab === 'charge' ? 'Report charge' : 'Combined'}
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 divide-y sm:divide-y-0 sm:divide-x divide-hairline">
+            <div className="py-2 sm:py-0 sm:pr-6">
+              <span className="text-13 text-muted block mb-1">Total charge</span>
+              <div className="text-22 sm:text-28 font-mono font-semibold text-ink tracking-tight">
+                <Money amount={totals.charge} />
+              </div>
+              <span className="text-13 text-muted mt-0.5 block">Total billed across records</span>
+            </div>
+
+            <div className="py-2 sm:py-0 sm:px-6">
+              <span className="text-13 text-muted block mb-1">Total paid</span>
+              <div className="text-22 sm:text-28 font-mono font-semibold text-brand tracking-tight">
+                <Money amount={totals.paid} />
+              </div>
+              <span className="text-13 text-muted mt-0.5 block">Collected at counter & UPI</span>
+            </div>
+
+            <div className="py-2 sm:py-0 sm:pl-6">
+              <span className="text-13 text-muted block mb-1">Total remaining</span>
+              <div className="text-22 sm:text-28 font-mono font-semibold text-amber tracking-tight">
+                <Money amount={totals.remaining} />
+              </div>
+              <span className="text-13 text-muted mt-0.5 block">Outstanding balance</span>
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
       {/* Tabs and Date Filter Bar */}
       <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 no-print">
-        {/* Three Tabs: OPD charge, Report charge, Combined */}
+        {/* Four Tabs: OPD charge, Report charge, Combined, Payments received */}
         <div className="flex items-center border border-hairline rounded-[4px] p-0.5 bg-paper">
           <button
             type="button"
@@ -521,28 +680,74 @@ export function FinalReport() {
           >
             Combined
           </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('payments')}
+            className={`px-3 py-1.5 text-13 font-medium rounded-[3px] transition-colors ${
+              activeTab === 'payments'
+                ? 'bg-surface text-brand font-semibold shadow-sm border border-hairline'
+                : 'text-muted hover:text-ink'
+            }`}
+          >
+            Payments received
+          </button>
         </div>
 
         {/* Date Filter */}
-        <div className="flex items-center gap-2">
-          <div className="flex items-center gap-1.5 text-13 text-muted">
-            <Calendar size={14} />
-            <span>Date:</span>
-          </div>
-          <Input
-            type="date"
-            value={dateFilter}
-            onChange={(e) => setDateFilter(e.target.value)}
-            className="w-auto text-13 py-1 min-h-[32px] h-[32px]"
-          />
-          {dateFilter && (
-            <Button
-              variant="quiet"
-              onClick={() => setDateFilter('')}
-              className="text-13 py-1 px-2 min-h-[32px] h-[32px]"
-            >
-              All dates
-            </Button>
+        <div className="flex flex-wrap items-center gap-2">
+          {activeTab === 'payments' ? (
+            <>
+              <div className="flex items-center gap-1.5 text-13 text-muted">
+                <Calendar size={14} />
+                <span>From:</span>
+                <Input
+                  type="date"
+                  value={fromDate}
+                  onChange={(e) => setFromDate(e.target.value)}
+                  className="w-auto text-13 py-1 min-h-[32px] h-[32px]"
+                />
+              </div>
+              <div className="flex items-center gap-1.5 text-13 text-muted">
+                <span>To:</span>
+                <Input
+                  type="date"
+                  value={toDate}
+                  onChange={(e) => setToDate(e.target.value)}
+                  className="w-auto text-13 py-1 min-h-[32px] h-[32px]"
+                />
+              </div>
+              {(fromDate || toDate) && (
+                <Button
+                  variant="quiet"
+                  onClick={() => { setFromDate(''); setToDate(''); }}
+                  className="text-13 py-1 px-2 min-h-[32px] h-[32px]"
+                >
+                  All dates
+                </Button>
+              )}
+            </>
+          ) : (
+            <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5 text-13 text-muted">
+                <Calendar size={14} />
+                <span>Date:</span>
+              </div>
+              <Input
+                type="date"
+                value={dateFilter}
+                onChange={(e) => setDateFilter(e.target.value)}
+                className="w-auto text-13 py-1 min-h-[32px] h-[32px]"
+              />
+              {dateFilter && (
+                <Button
+                  variant="quiet"
+                  onClick={() => setDateFilter('')}
+                  className="text-13 py-1 px-2 min-h-[32px] h-[32px]"
+                >
+                  All dates
+                </Button>
+              )}
+            </div>
           )}
         </div>
       </div>
@@ -554,11 +759,13 @@ export function FinalReport() {
             ? opdColumns
             : activeTab === 'charge'
             ? reportColumns
-            : combinedColumns
+            : activeTab === 'combined'
+            ? combinedColumns
+            : paymentColumns
         }
         data={items}
         footerRow={getFooterRow()}
-        emptyMessage={loading ? 'Calculating ledger...' : 'No records found for the selected date.'}
+        emptyMessage={loading ? 'Calculating ledger...' : (activeTab === 'payments' ? 'No payments recorded for this date range.' : 'No records found for the selected date.')}
       />
     </div>
   );

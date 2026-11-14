@@ -1,5 +1,6 @@
 import express from 'express';
-import { Patient } from '../models/index.js';
+import { Patient, Payment } from '../models/index.js';
+import { formatKolkataDateTime, calculateDaysPending } from '../utils/formatters.js';
 
 const router = express.Router();
 const TIMEZONE = 'Asia/Kolkata';
@@ -8,7 +9,7 @@ const DATE_REGEX = /^\d{4}-\d{2}-\d{2}$/;
 /**
  * Helper to build date range filter in Asia/Kolkata timezone
  */
-function buildDateFilter(from, to, date) {
+function buildDateFilter(from, to, date, fieldName = 'visitDate') {
   const match = { isDeleted: false };
   const fromStr = from || date;
   const toStr = to || date;
@@ -21,14 +22,12 @@ function buildDateFilter(from, to, date) {
   }
 
   if (fromStr || toStr) {
-    match.visitDate = {};
+    match[fieldName] = {};
     if (fromStr) {
-      // Midnight in Asia/Kolkata (+05:30)
-      match.visitDate.$gte = new Date(`${fromStr}T00:00:00.000+05:30`);
+      match[fieldName].$gte = new Date(`${fromStr}T00:00:00.000+05:30`);
     }
     if (toStr) {
-      // End of day in Asia/Kolkata (+05:30)
-      match.visitDate.$lte = new Date(`${toStr}T23:59:59.999+05:30`);
+      match[fieldName].$lte = new Date(`${toStr}T23:59:59.999+05:30`);
     }
   }
 
@@ -37,10 +36,7 @@ function buildDateFilter(from, to, date) {
 
 /**
  * GET /api/reports/opd
- * Totals for OPD charge, OPD paid and OPD remaining.
- * Patient list with each patient's name, phone, visit date, OPD charge, paid and remaining.
- * Optional query pending=true to return only patients with a remaining amount.
- * Sort by largest remaining amount first.
+ * Added daysPending (days since the visit date) to each patient.
  */
 router.get('/opd', async (req, res) => {
   try {
@@ -116,7 +112,11 @@ router.get('/opd', async (req, res) => {
     const result = await Patient.aggregate(pipeline);
     const facet = result[0] || { totals: [], patients: [] };
     const totalsData = facet.totals[0] || { opdCharge: 0, opdPaid: 0, opdRemaining: 0 };
-    const patientsList = facet.patients || [];
+
+    const patientsList = (facet.patients || []).map(p => ({
+      ...p,
+      daysPending: calculateDaysPending(p.visitDate)
+    }));
 
     res.json({
       totals: {
@@ -137,16 +137,13 @@ router.get('/opd', async (req, res) => {
 
 /**
  * Report charge logic handler
- * Totals for report charge, report paid and report remaining.
- * Only for patients whose report charge is more than 0.
- * Optional query pending=true to return only patients with a remaining amount.
- * Sort by largest remaining amount first.
+ * Added daysPending (days since the visit date) to each patient.
  */
 async function handleReportCharge(req, res) {
   try {
     const { from, to, date, pending } = req.query;
     const match = buildDateFilter(from, to, date);
-    match.reportCharge = { $gt: 0 }; // only for patients whose report charge is more than 0
+    match.reportCharge = { $gt: 0 };
 
     const isPendingOnly = pending === 'true' || pending === true;
 
@@ -219,7 +216,11 @@ async function handleReportCharge(req, res) {
     const result = await Patient.aggregate(pipeline);
     const facet = result[0] || { totals: [], patients: [] };
     const totalsData = facet.totals[0] || { reportCharge: 0, reportPaid: 0, reportRemaining: 0 };
-    const patientsList = facet.patients || [];
+
+    const patientsList = (facet.patients || []).map(p => ({
+      ...p,
+      daysPending: calculateDaysPending(p.visitDate)
+    }));
 
     res.json({
       totals: {
@@ -238,15 +239,11 @@ async function handleReportCharge(req, res) {
   }
 }
 
-// Support both /report-charge (per requirement) and /charge (legacy alias)
 router.get('/report-charge', handleReportCharge);
 router.get('/charge', handleReportCharge);
 
 /**
  * GET /api/reports/combined
- * Grouped by date (Asia/Kolkata timezone), newest first, with:
- * patient count, OPD charge, report charge, total paid and total remaining,
- * plus a grand total row.
  */
 router.get('/combined', async (req, res) => {
   try {
@@ -380,6 +377,221 @@ router.get('/combined', async (req, res) => {
     });
   } catch (err) {
     res.status(400).json({ error: err.message || 'Failed to generate combined report' });
+  }
+});
+
+/**
+ * GET /api/reports/payments
+ * Query params: optional from, to, type, mode.
+ * Returns payments in range (newest first) with:
+ * paidAt, paidAtLabel, patient name, phone, type, amount, mode,
+ * plus totals by day, by type, by mode, and a grand total.
+ */
+router.get('/payments', async (req, res) => {
+  try {
+    const { from, to, date, type, mode } = req.query;
+    const match = {};
+
+    const fromStr = from || date;
+    const toStr = to || date;
+
+    if (fromStr && !DATE_REGEX.test(fromStr)) {
+      return res.status(400).json({ error: 'Invalid from date format. Use YYYY-MM-DD.' });
+    }
+    if (toStr && !DATE_REGEX.test(toStr)) {
+      return res.status(400).json({ error: 'Invalid to date format. Use YYYY-MM-DD.' });
+    }
+
+    if (fromStr || toStr) {
+      match.paidAt = {};
+      if (fromStr) {
+        match.paidAt.$gte = new Date(`${fromStr}T00:00:00.000+05:30`);
+      }
+      if (toStr) {
+        match.paidAt.$lte = new Date(`${toStr}T23:59:59.999+05:30`);
+      }
+    }
+
+    if (type && ['opd', 'report'].includes(type)) {
+      match.type = type;
+    }
+
+    if (mode && ['cash', 'upi', 'card', 'other'].includes(mode)) {
+      match.mode = mode;
+    }
+
+    const pipeline = [
+      { $match: match },
+      {
+        $lookup: {
+          from: 'patients',
+          localField: 'patientId',
+          foreignField: '_id',
+          as: 'patientDoc'
+        }
+      },
+      {
+        $unwind: {
+          path: '$patientDoc',
+          preserveNullAndEmptyArrays: true
+        }
+      },
+      // Exclude payments for soft-deleted patients if any
+      {
+        $match: {
+          'patientDoc.isDeleted': { $ne: true }
+        }
+      },
+      {
+        $addFields: {
+          mode: {
+            $switch: {
+              branches: [
+                { case: { $in: ['$mode', ['cash', 'upi', 'card', 'other']] }, then: '$mode' }
+              ],
+              default: 'cash'
+            }
+          },
+          dateStr: {
+            $dateToString: {
+              format: '%Y-%m-%d',
+              date: '$paidAt',
+              timezone: TIMEZONE
+            }
+          }
+        }
+      },
+      {
+        $facet: {
+          paymentsList: [
+            { $sort: { paidAt: -1, _id: -1 } },
+            {
+              $project: {
+                _id: 1,
+                id: '$_id',
+                paidAt: 1,
+                amount: 1,
+                type: 1,
+                mode: 1,
+                note: 1,
+                patientId: '$patientDoc._id',
+                patientName: { $ifNull: ['$patientDoc.name', '—'] },
+                name: { $ifNull: ['$patientDoc.name', '—'] },
+                phone: { $ifNull: ['$patientDoc.phone', '—'] },
+                token: '$patientDoc.token'
+              }
+            }
+          ],
+          byDay: [
+            {
+              $group: {
+                _id: '$dateStr',
+                count: { $sum: 1 },
+                amount: { $sum: '$amount' },
+                cash: {
+                  $sum: { $cond: [{ $eq: ['$mode', 'cash'] }, '$amount', 0] }
+                },
+                upi: {
+                  $sum: { $cond: [{ $eq: ['$mode', 'upi'] }, '$amount', 0] }
+                },
+                card: {
+                  $sum: { $cond: [{ $eq: ['$mode', 'card'] }, '$amount', 0] }
+                },
+                other: {
+                  $sum: { $cond: [{ $eq: ['$mode', 'other'] }, '$amount', 0] }
+                }
+              }
+            },
+            { $sort: { _id: -1 } },
+            {
+              $project: {
+                _id: 0,
+                date: '$_id',
+                count: 1,
+                amount: 1,
+                cash: 1,
+                upi: 1,
+                card: 1,
+                other: 1
+              }
+            }
+          ],
+          byType: [
+            {
+              $group: {
+                _id: '$type',
+                amount: { $sum: '$amount' },
+                count: { $sum: 1 }
+              }
+            }
+          ],
+          byMode: [
+            {
+              $group: {
+                _id: '$mode',
+                amount: { $sum: '$amount' },
+                count: { $sum: 1 }
+              }
+            }
+          ],
+          grandTotal: [
+            {
+              $group: {
+                _id: null,
+                totalAmount: { $sum: '$amount' },
+                totalCount: { $sum: 1 }
+              }
+            }
+          ]
+        }
+      }
+    ];
+
+    const result = await Payment.aggregate(pipeline);
+    const facet = result[0] || {
+      paymentsList: [],
+      byDay: [],
+      byType: [],
+      byMode: [],
+      grandTotal: []
+    };
+
+    const payments = (facet.paymentsList || []).map(p => ({
+      ...p,
+      paidAt: p.paidAt ? new Date(p.paidAt).toISOString() : '',
+      paidAtLabel: formatKolkataDateTime(p.paidAt)
+    }));
+
+    // Format byType
+    const byTypeObj = { opd: 0, report: 0 };
+    (facet.byType || []).forEach(t => {
+      if (t._id) byTypeObj[t._id] = t.amount;
+    });
+
+    // Format byMode
+    const byModeObj = { cash: 0, upi: 0, card: 0, other: 0 };
+    (facet.byMode || []).forEach(m => {
+      const modeKey = (m._id && ['cash', 'upi', 'card', 'other'].includes(m._id)) ? m._id : 'cash';
+      byModeObj[modeKey] = (byModeObj[modeKey] || 0) + m.amount;
+    });
+
+    const grandTotalObj = facet.grandTotal[0] || { totalAmount: 0, totalCount: 0 };
+
+    res.json({
+      payments,
+      items: payments,
+      totals: {
+        byDay: facet.byDay || [],
+        byType: byTypeObj,
+        byMode: byModeObj,
+        grandTotal: grandTotalObj,
+        totalAmount: grandTotalObj.totalAmount,
+        totalCount: grandTotalObj.totalCount
+      },
+      grandTotal: grandTotalObj
+    });
+  } catch (err) {
+    res.status(400).json({ error: err.message || 'Failed to generate payments report' });
   }
 });
 

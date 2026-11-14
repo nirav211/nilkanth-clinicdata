@@ -10,7 +10,7 @@ const MONTH_NAMES = [
  */
 export function formatDate(input) {
   if (!input) return '—';
-  
+
   // If string formatted as 'YYYY-MM-DD'
   if (typeof input === 'string' && /^\d{4}-\d{2}-\d{2}/.test(input)) {
     const parts = input.slice(0, 10).split('-');
@@ -23,11 +23,37 @@ export function formatDate(input) {
   const d = new Date(input);
   if (isNaN(d.getTime())) return '—';
 
-  const day = d.getDate();
-  const month = MONTH_NAMES[d.getMonth()];
-  const year = d.getFullYear();
+  return d.toLocaleDateString('en-GB', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    timeZone: 'Asia/Kolkata'
+  });
+}
 
-  return `${day} ${month} ${year}`;
+/**
+ * Format date and time in Asia/Kolkata: "14 Nov 2026, 5:08 pm"
+ */
+export function formatDateTime(input) {
+  if (!input) return '—';
+  const d = new Date(input);
+  if (isNaN(d.getTime())) return '—';
+
+  const dateStr = d.toLocaleDateString('en-GB', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    timeZone: 'Asia/Kolkata'
+  });
+
+  const timeStr = d.toLocaleTimeString('en-US', {
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+    timeZone: 'Asia/Kolkata'
+  }).toLowerCase();
+
+  return `${dateStr}, ${timeStr}`;
 }
 
 export function DateText({ date, className = '' }) {
@@ -38,5 +64,12 @@ export function DateText({ date, className = '' }) {
   );
 }
 
-export default DateText;
+export function DateTimeText({ date, className = '' }) {
+  return (
+    <span className={`text-13 text-ink ${className}`}>
+      {formatDateTime(date)}
+    </span>
+  );
+}
 
+export default DateText;

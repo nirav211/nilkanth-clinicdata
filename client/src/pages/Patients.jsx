@@ -3,7 +3,7 @@ import { listPatients, getPatient, addPayment } from '../api/mockApi';
 import PageHeader from '../components/PageHeader';
 import DataTable from '../components/DataTable';
 import Money from '../components/Money';
-import DateText from '../components/DateText';
+import DateText, { DateTimeText, formatDateTime } from '../components/DateText';
 import StatusText from '../components/StatusText';
 import Input from '../components/Input';
 import Button from '../components/Button';
@@ -34,6 +34,9 @@ export function Patients() {
   // Inline payment in side panel
   const [payAmount, setPayAmount] = useState('');
   const [payType, setPayType] = useState('opd');
+  const [payMode, setPayMode] = useState('cash');
+  const [customDateTime, setCustomDateTime] = useState(false);
+  const [payDateTime, setPayDateTime] = useState('');
   const [payNote, setPayNote] = useState('');
   const [paying, setPaying] = useState(false);
   const [payError, setPayError] = useState('');
@@ -108,30 +111,32 @@ export function Patients() {
       return;
     }
 
-    if (payType === 'opd' && amt > selectedPatient.opdRemaining) {
-      // Required wording: "Paid amount cannot be more than the charge."
-      setPayError('Paid amount cannot be more than the charge.');
-      return;
-    }
-
-    if (payType === 'report' && amt > selectedPatient.reportRemaining) {
-      // Required wording: "Paid amount cannot be more than the charge."
-      setPayError('Paid amount cannot be more than the charge.');
+    const maxAllowed = payType === 'opd' ? selectedPatient.opdRemaining : selectedPatient.reportRemaining;
+    if (amt > maxAllowed) {
+      setPayError(`Amount cannot be more than the remaining ₹${maxAllowed}.`);
       return;
     }
 
     setPaying(true);
     try {
-      const res = await addPayment(selectedPatient.id, {
+      const payload = {
         amount: amt,
         type: payType,
+        mode: payMode,
         note: payNote
-      });
-      // Required wording: "₹300 received from Kavita Desai."
-      showToast(`₹${amt} received from ${selectedPatient.name}.`);
+      };
+      if (customDateTime && payDateTime) {
+        payload.paidAt = new Date(payDateTime).toISOString();
+      }
+
+      const res = await addPayment(selectedPatient.id, payload);
+      const paidDateLabel = res.payment?.paidAtLabel || formatDateTime(res.payment?.paidAt || new Date());
+      showToast(`₹${amt} received from ${selectedPatient.name} on ${paidDateLabel}.`);
       setSelectedPatient(res.patient);
       setPayAmount('');
       setPayNote('');
+      setCustomDateTime(false);
+      setPayDateTime('');
       loadData();
     } catch (err) {
       setPayError(err.message || 'Payment could not be recorded.');
@@ -234,6 +239,15 @@ export function Patients() {
       render: (row) => (
         <span className={row.reportRemaining > 0 ? 'text-amber font-mono font-medium' : 'text-muted font-mono'}>
           <Money amount={row.reportRemaining} />
+        </span>
+      )
+    },
+    {
+      title: 'Last payment',
+      key: 'lastPaymentAt',
+      render: (row) => (
+        <span className="font-mono text-11 text-ink">
+          {row.lastPaymentAt ? <DateTimeText date={row.lastPaymentAt} /> : <span className="text-muted">—</span>}
         </span>
       )
     },
@@ -626,13 +640,59 @@ export function Patients() {
 
                 {/* Receive Payment Inline Form */}
                 {(selectedPatient.opdRemaining > 0 || selectedPatient.reportRemaining > 0) && (
-                  <div className="border border-hairline rounded-[6px] p-4 bg-surface-subtle">
-                    <h3 className="text-15 font-semibold text-ink mb-2">
-                      Receive remaining payment
-                    </h3>
-                    {payError && (
-                      <p className="text-13 text-red font-medium mb-2">{payError}</p>
+                  <div className="border border-hairline rounded-[6px] p-4 bg-surface-subtle space-y-3">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-15 font-semibold text-ink">
+                        Receive remaining payment
+                      </h3>
+                      <div className="text-11 text-muted">
+                        {!customDateTime ? (
+                          <span>
+                            Date and time: <strong className="text-ink">Now</strong>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setCustomDateTime(true);
+                                const now = new Date();
+                                const localIso = new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+                                setPayDateTime(localIso);
+                              }}
+                              className="text-brand hover:underline font-medium ml-1.5"
+                            >
+                              Change
+                            </button>
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setCustomDateTime(false);
+                              setPayDateTime('');
+                            }}
+                            className="text-brand hover:underline font-medium"
+                          >
+                            Reset to now
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {customDateTime && (
+                      <div>
+                        <label className="text-11 text-muted block mb-1">Date and time</label>
+                        <Input
+                          type="datetime-local"
+                          value={payDateTime}
+                          onChange={(e) => setPayDateTime(e.target.value)}
+                          className="text-13 py-1"
+                        />
+                      </div>
                     )}
+
+                    {payError && (
+                      <p className="text-13 text-red font-medium">{payError}</p>
+                    )}
+
                     <form onSubmit={handleReceivePayment} className="space-y-3">
                       <div className="grid grid-cols-2 gap-2">
                         <div>
@@ -668,12 +728,30 @@ export function Patients() {
                         </div>
                       </div>
 
-                      <Input
-                        value={payNote}
-                        onChange={(e) => setPayNote(e.target.value)}
-                        placeholder="Payment note (e.g. Cash, UPI, GPay)"
-                        className="py-1 text-13"
-                      />
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="text-13 font-medium text-ink block mb-1">Mode</label>
+                          <select
+                            value={payMode}
+                            onChange={(e) => setPayMode(e.target.value)}
+                            className="w-full bg-surface text-ink border border-hairline rounded-[4px] px-2.5 py-1.5 text-13"
+                          >
+                            <option value="cash">Cash</option>
+                            <option value="upi">UPI</option>
+                            <option value="card">Card</option>
+                            <option value="other">Other</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="text-13 font-medium text-ink block mb-1">Note (optional)</label>
+                          <Input
+                            value={payNote}
+                            onChange={(e) => setPayNote(e.target.value)}
+                            placeholder="e.g. Counter, GPay, PhonePe"
+                            className="py-1 text-13"
+                          />
+                        </div>
+                      </div>
 
                       <Button
                         type="submit"
@@ -690,30 +768,50 @@ export function Patients() {
                 {/* Payment History */}
                 <div>
                   <h3 className="text-15 font-semibold text-ink mb-2">
-                    Payment receipts
+                    Payment history
                   </h3>
                   {selectedPatient.payments?.length > 0 ? (
-                    <div className="space-y-2">
-                      {selectedPatient.payments.map((pm, idx) => (
-                        <div
-                          key={pm.id || idx}
-                          className="flex items-center justify-between p-2.5 bg-paper rounded-[4px] border border-hairline text-13 font-mono"
-                        >
-                          <div>
-                            <span className="text-ink font-sans font-medium text-13 block">
-                              {pm.type === 'opd' ? 'OPD consultation' : 'Diagnostic report'}
-                            </span>
-                            <span className="text-muted text-11">{pm.date}</span>
-                            {pm.note && <span className="text-muted font-sans ml-2">({pm.note})</span>}
-                          </div>
-                          <span className="font-semibold text-brand text-15">
-                            <Money amount={pm.amount} />
-                          </span>
-                        </div>
-                      ))}
+                    <div className="border border-hairline rounded-[4px] overflow-hidden">
+                      <table className="w-full text-left text-13 border-collapse">
+                        <thead className="bg-paper border-b border-hairline text-muted">
+                          <tr>
+                            <th className="p-2 font-medium">Date and time</th>
+                            <th className="p-2 font-medium">For</th>
+                            <th className="p-2 font-medium text-right">Amount</th>
+                            <th className="p-2 font-medium text-right">Mode</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-hairline bg-surface">
+                          {selectedPatient.payments.map((pm, idx) => (
+                            <tr key={pm.id || idx}>
+                              <td className="p-2 font-mono text-11 text-ink whitespace-nowrap">
+                                {pm.paidAtLabel || formatDateTime(pm.paidAt)}
+                              </td>
+                              <td className="p-2 text-ink">
+                                <span>{pm.type === 'opd' ? 'OPD charge' : 'Report charge'}</span>
+                                {pm.note && <span className="text-muted text-11 ml-1.5 font-sans">({pm.note})</span>}
+                              </td>
+                              <td className="p-2 text-right font-mono font-medium text-brand whitespace-nowrap">
+                                <Money amount={pm.amount} />
+                              </td>
+                              <td className="p-2 text-right text-muted capitalize text-11 font-mono whitespace-nowrap">
+                                {pm.mode || 'cash'}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      <div className="bg-surface-subtle p-2.5 border-t border-hairline flex items-center justify-between font-mono text-13">
+                        <span className="text-ink font-medium">
+                          Total paid: <Money amount={selectedPatient.opdPaid + selectedPatient.reportPaid} />
+                        </span>
+                        <span className={(selectedPatient.opdRemaining + selectedPatient.reportRemaining) > 0 ? 'text-amber font-semibold' : 'text-brand font-semibold'}>
+                          Remaining: <Money amount={selectedPatient.opdRemaining + selectedPatient.reportRemaining} />
+                        </span>
+                      </div>
                     </div>
                   ) : (
-                    <p className="text-13 text-muted">No payments recorded yet.</p>
+                    <p className="text-13 text-muted">No payment received yet.</p>
                   )}
                 </div>
               </div>

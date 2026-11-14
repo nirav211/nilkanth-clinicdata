@@ -1,6 +1,7 @@
 import express from 'express';
 import { z } from 'zod';
 import { Patient, Payment, AuditLog } from '../models/index.js';
+import { formatKolkataDateTime } from '../utils/formatters.js';
 
 const router = express.Router();
 
@@ -20,7 +21,8 @@ const patientSchema = z.object({
   opdPaid: z.coerce.number().min(0).default(0),
   reportCharge: z.coerce.number().min(0).default(0),
   reportPaid: z.coerce.number().min(0).default(0),
-  visitDate: z.string().optional()
+  visitDate: z.string().optional(),
+  paymentMode: z.string().optional()
 });
 
 /**
@@ -52,8 +54,16 @@ router.get('/', async (req, res) => {
       .skip((pageNum - 1) * pageSize)
       .limit(pageSize);
 
+    const formattedPatients = patients.map(p => {
+      const json = p.toJSON();
+      return {
+        ...json,
+        lastPaymentAtLabel: p.lastPaymentAt ? formatKolkataDateTime(p.lastPaymentAt) : ''
+      };
+    });
+
     res.json({
-      patients,
+      patients: formattedPatients,
       total,
       page: pageNum,
       limit: pageSize,
@@ -66,6 +76,8 @@ router.get('/', async (req, res) => {
 
 /**
  * POST /api/patients
+ * When a patient is created with opdPaid or reportPaid > 0, also creates Payment records.
+ * mode taken from paymentMode field (default "cash").
  */
 router.post('/', async (req, res) => {
   const parsed = patientSchema.safeParse(req.body);
@@ -79,23 +91,32 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ error: 'Paid amount cannot be more than the charge.' });
   }
 
+  const rawMode = (req.body.paymentMode || req.body.mode || 'cash').toLowerCase();
+  const paymentMode = ['cash', 'upi', 'card', 'other'].includes(rawMode) ? rawMode : 'cash';
+  const saveTime = new Date();
+
   try {
+    const hasInitialPayment = data.opdPaid > 0 || data.reportPaid > 0;
     const patient = new Patient({
       ...data,
-      createdBy: req.user._id, // Logged-in user used for createdBy
-      visitDate: data.visitDate ? new Date(data.visitDate) : new Date()
+      createdBy: req.user._id,
+      visitDate: data.visitDate ? new Date(data.visitDate) : new Date(),
+      lastPaymentAt: hasInitialPayment ? saveTime : null
     });
 
     await patient.save();
 
-    // Create payment records if paid > 0
+    // Create payment records if paid > 0 so history starts from first payment
     if (data.opdPaid > 0) {
       await Payment.create({
         patientId: patient._id,
         type: 'opd',
         amount: data.opdPaid,
-        receivedBy: req.user._id, // Logged-in user used for receivedBy
-        date: patient.visitDate
+        mode: paymentMode,
+        paidAt: saveTime,
+        date: saveTime,
+        receivedBy: req.user._id,
+        note: 'Initial OPD payment at registration'
       });
     }
 
@@ -104,17 +125,26 @@ router.post('/', async (req, res) => {
         patientId: patient._id,
         type: 'report',
         amount: data.reportPaid,
+        mode: paymentMode,
+        paidAt: saveTime,
+        date: saveTime,
         receivedBy: req.user._id,
-        date: patient.visitDate
+        note: 'Initial report payment at registration'
       });
     }
 
     // Audit log
     await AuditLog.create({
-      userId: req.user._id, // Logged-in user used for AuditLog userId
+      userId: req.user._id,
       action: 'CREATE_PATIENT',
       patientId: patient._id,
-      details: { name: patient.name, opdCharge: data.opdCharge, reportCharge: data.reportCharge }
+      details: {
+        name: patient.name,
+        opdCharge: data.opdCharge,
+        reportCharge: data.reportCharge,
+        paymentMode,
+        paidAt: saveTime
+      }
     });
 
     res.status(201).json(patient);
@@ -125,6 +155,7 @@ router.post('/', async (req, res) => {
 
 /**
  * GET /api/patients/:id
+ * Returns payments newest first, with paidAt in ISO and paidAtLabel in Asia/Kolkata format.
  */
 router.get('/:id', async (req, res) => {
   try {
@@ -133,11 +164,22 @@ router.get('/:id', async (req, res) => {
       return res.status(404).json({ error: 'Patient not found' });
     }
 
-    const payments = await Payment.find({ patientId: patient._id }).sort({ date: -1 });
+    const payments = await Payment.find({ patientId: patient._id })
+      .sort({ paidAt: -1, date: -1, createdAt: -1 });
+
+    const formattedPayments = payments.map(p => {
+      const pDate = p.paidAt || p.date || p.createdAt;
+      return {
+        ...p.toJSON(),
+        paidAt: pDate ? new Date(pDate).toISOString() : '',
+        paidAtLabel: formatKolkataDateTime(pDate)
+      };
+    });
 
     res.json({
       ...patient.toJSON(),
-      payments
+      lastPaymentAtLabel: patient.lastPaymentAt ? formatKolkataDateTime(patient.lastPaymentAt) : '',
+      payments: formattedPayments
     });
   } catch (err) {
     res.status(500).json({ error: 'Failed to retrieve patient' });
@@ -146,9 +188,13 @@ router.get('/:id', async (req, res) => {
 
 /**
  * POST /api/patients/:id/payments
+ * Accept amount, type, mode, note, and optional paidAt.
+ * paidAt cannot be in the future and cannot be before the patient's visit date.
+ * Amount cannot exceed remaining.
+ * Saves paidAt in AuditLog detail.
  */
 router.post('/:id/payments', async (req, res) => {
-  const { amount, type, note } = req.body;
+  const { amount, type, mode = 'cash', note = '', paidAt } = req.body;
   const numAmount = Number(amount);
 
   if (!numAmount || numAmount <= 0) {
@@ -159,22 +205,53 @@ router.post('/:id/payments', async (req, res) => {
     return res.status(400).json({ error: 'Invalid payment type.' });
   }
 
+  const rawMode = String(mode).toLowerCase();
+  const paymentMode = ['cash', 'upi', 'card', 'other'].includes(rawMode) ? rawMode : 'cash';
+
+  // Determine and validate paidAt date
+  let paymentDate = new Date();
+  if (paidAt) {
+    paymentDate = new Date(paidAt);
+    if (isNaN(paymentDate.getTime())) {
+      return res.status(400).json({ error: 'Invalid payment date and time.' });
+    }
+  }
+
+  // 1. paidAt cannot be in the future (allow 10 seconds margin for network skew)
+  const now = new Date();
+  if (paymentDate.getTime() > now.getTime() + 10000) {
+    return res.status(400).json({ error: 'Payment date cannot be in the future.' });
+  }
+
   try {
     const patient = await Patient.findOne({ _id: req.params.id, isDeleted: false });
     if (!patient) {
       return res.status(404).json({ error: 'Patient not found' });
     }
 
+    // 2. paidAt cannot be before the patient's visit date
+    // Compare full date timestamps:
+    const visitDateObj = new Date(patient.visitDate);
+    // Allow start of visit date in Asia/Kolkata
+    const visitKolkataDay = new Date(visitDateObj.toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }) + 'T00:00:00.000+05:30');
+    if (paymentDate.getTime() < visitKolkataDay.getTime()) {
+      return res.status(400).json({ error: 'Payment date cannot be before the visit date.' });
+    }
+
+    // 3. Amount cannot exceed remaining
+    const remaining = type === 'opd' ? patient.opdRemaining : patient.reportRemaining;
+    if (numAmount > remaining) {
+      return res.status(400).json({ error: `Amount cannot be more than the remaining ₹${remaining}.` });
+    }
+
     if (type === 'opd') {
-      if (numAmount > patient.opdRemaining) {
-        return res.status(400).json({ error: 'Paid amount cannot be more than the charge.' });
-      }
       patient.opdPaid += numAmount;
     } else {
-      if (numAmount > patient.reportRemaining) {
-        return res.status(400).json({ error: 'Paid amount cannot be more than the charge.' });
-      }
       patient.reportPaid += numAmount;
+    }
+
+    if (!patient.lastPaymentAt || paymentDate > patient.lastPaymentAt) {
+      patient.lastPaymentAt = paymentDate;
     }
 
     await patient.save();
@@ -183,23 +260,40 @@ router.post('/:id/payments', async (req, res) => {
       patientId: patient._id,
       type,
       amount: numAmount,
-      receivedBy: req.user._id, // Logged-in user used for receivedBy
-      date: new Date()
+      mode: paymentMode,
+      note: (note || '').trim(),
+      paidAt: paymentDate,
+      date: paymentDate,
+      receivedBy: req.user._id
     });
 
-    // Audit log
+    // Save paidAt in the AuditLog detail
     await AuditLog.create({
-      userId: req.user._id, // Logged-in user used for AuditLog userId
+      userId: req.user._id,
       action: 'ADD_PAYMENT',
       patientId: patient._id,
-      details: { amount: numAmount, type, note }
+      details: {
+        amount: numAmount,
+        type,
+        mode: paymentMode,
+        note: (note || '').trim(),
+        paidAt: paymentDate
+      }
     });
 
-    res.json({ patient, payment });
+    const paymentJson = {
+      ...payment.toJSON(),
+      paidAt: payment.paidAt.toISOString(),
+      paidAtLabel: formatKolkataDateTime(payment.paidAt)
+    };
+
+    res.json({
+      patient: patient.toJSON(),
+      payment: paymentJson
+    });
   } catch (err) {
     res.status(500).json({ error: err.message || 'Payment recording failed' });
   }
 });
 
 export default router;
-

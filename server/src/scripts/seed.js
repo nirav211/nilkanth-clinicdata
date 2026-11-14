@@ -1,7 +1,7 @@
 import '../config/env.js';
 import bcrypt from 'bcryptjs';
 import { connectDB, disconnectDB } from '../config/db.js';
-import { User, Patient } from '../models/index.js';
+import { User, Patient, Payment } from '../models/index.js';
 
 // Refuse to run if NODE_ENV is "production"
 if (process.env.NODE_ENV === 'production') {
@@ -180,6 +180,11 @@ async function run() {
     await connectDB();
 
     if (isClearOnly) {
+      const oldSamplePatients = await Patient.find({ isSample: true }).select('_id');
+      const oldIds = oldSamplePatients.map(p => p._id);
+      if (oldIds.length > 0) {
+        await Payment.deleteMany({ patientId: { $in: oldIds } });
+      }
       const deleteResult = await Patient.deleteMany({ isSample: true });
       console.log(`Sample patients deleted: ${deleteResult.deletedCount}.`);
       await disconnectDB();
@@ -215,19 +220,54 @@ async function run() {
       }
     }
 
-    // Clear previous sample patients first
+    // Clear previous sample patients and their payments first
+    const existingSamples = await Patient.find({ isSample: true }).select('_id');
+    const existingIds = existingSamples.map(p => p._id);
+    if (existingIds.length > 0) {
+      await Payment.deleteMany({ patientId: { $in: existingIds } });
+    }
     await Patient.deleteMany({ isSample: true });
 
     // Create 10 sample patients
+    const now = new Date();
     const docs = SAMPLE_PATIENTS.map(p => ({
       ...p,
       isSample: true,
       createdBy: user._id,
-      visitDate: new Date()
+      visitDate: now,
+      lastPaymentAt: (p.opdPaid > 0 || p.reportPaid > 0) ? now : null
     }));
 
     const createdPatients = await Patient.insertMany(docs);
     patientsCreated = createdPatients.length;
+
+    // Create payment records for initial payments
+    for (const patient of createdPatients) {
+      if (patient.opdPaid > 0) {
+        await Payment.create({
+          patientId: patient._id,
+          type: 'opd',
+          amount: patient.opdPaid,
+          mode: 'cash',
+          paidAt: now,
+          date: now,
+          receivedBy: user._id,
+          note: 'Initial OPD consultation fee'
+        });
+      }
+      if (patient.reportPaid > 0) {
+        await Payment.create({
+          patientId: patient._id,
+          type: 'report',
+          amount: patient.reportPaid,
+          mode: 'cash',
+          paidAt: now,
+          date: now,
+          receivedBy: user._id,
+          note: 'Initial diagnostic report charge'
+        });
+      }
+    }
 
     console.log(`Users created: ${usersCreated}. Patients created: ${patientsCreated}.`);
 

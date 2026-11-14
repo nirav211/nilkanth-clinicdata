@@ -9,7 +9,8 @@
     "seed:clear": "node src/scripts/seed.js --clear",
     "reset-password": "node src/scripts/resetPassword.js",
     "test": "node src/scripts/testAuth.js",
-    "test:reports": "node src/scripts/testReports.js"
+    "test:reports": "node src/scripts/testReports.js",
+    "backfill-payments": "node src/scripts/backfillPayments.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

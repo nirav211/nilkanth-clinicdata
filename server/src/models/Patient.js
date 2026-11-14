@@ -1,4 +1,5 @@
 import mongoose from 'mongoose';
+import { formatKolkataDateTime } from '../utils/formatters.js';
 
 const medicineItemSchema = new mongoose.Schema(
   {
@@ -117,6 +118,10 @@ const patientSchema = new mongoose.Schema(
     sheetSyncStatus: {
       type: String,
       default: ''
+    },
+    lastPaymentAt: {
+      type: Date,
+      default: null
     }
   },
   {
@@ -134,8 +139,12 @@ patientSchema.index({ name: 1 });
 // High-performance compound indexes for reports aggregation (75,000+ patients/year)
 patientSchema.index({ isDeleted: 1, visitDate: -1 });
 patientSchema.index({ isDeleted: 1, reportCharge: 1, visitDate: -1 });
+patientSchema.index({ lastPaymentAt: -1 });
 
 // Virtuals
+patientSchema.virtual('lastPaymentAtLabel').get(function () {
+  return this.lastPaymentAt ? formatKolkataDateTime(this.lastPaymentAt) : '';
+});
 patientSchema.virtual('opdRemaining').get(function () {
   const charge = typeof this.opdCharge === 'number' ? this.opdCharge : 0;
   const paid = typeof this.opdPaid === 'number' ? this.opdPaid : 0;
