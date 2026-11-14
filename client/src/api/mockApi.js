@@ -1,15 +1,23 @@
-// Nilkanth Clinic — Hybrid API & Ledger Data Layer
-// Connects to backend API (http://localhost:5000/api) with MongoDB Atlas persistence,
-// and seamless local fallback so the application works offline or online.
+// Nilkanth Clinic — Production Axios API Client
+// Connects directly to backend API (/api) backed by MongoDB Atlas.
+// Stores JWT in localStorage, sends Bearer token on every request,
+// and redirects to /login on 401 Unauthorized responses.
 
-const API_BASE = '/api';
-const STORAGE_KEY = 'nilkanth_clinic_data_v2';
+import axios from 'axios';
+
+const API_BASE = typeof window !== 'undefined' ? '/api' : (process.env.API_URL || 'http://127.0.0.1:5000/api');
 const AUTH_KEY = 'nilkanth_clinic_auth_v1';
 
-const getTodayIso = () => new Date().toISOString().slice(0, 10);
-const TODAY = getTodayIso();
+// Create configured axios instance
+export const api = axios.create({
+  baseURL: API_BASE,
+  headers: {
+    'Content-Type': 'application/json'
+  }
+});
 
-function getAuthToken() {
+// Helper to get stored auth token
+export function getAuthToken() {
   try {
     const raw = localStorage.getItem(AUTH_KEY);
     return raw ? JSON.parse(raw).token : null;
@@ -18,190 +26,120 @@ function getAuthToken() {
   }
 }
 
-const INITIAL_PATIENTS = [
-  {
-    id: 'NK-2026-101',
-    token: 1,
-    name: 'Rameshchandra Patel',
-    age: 62,
-    gender: 'Male',
-    phone: '9825012345',
-    weight: '68',
-    bp: '138/86',
-    pulse: '74',
-    temp: '98.4',
-    complaints: 'Routine follow up for diabetes and blood pressure',
-    diagnosis: 'Hypertension, T2DM',
-    address: '14 Shrinath Society, Navrangpura, Ahmedabad',
-    visitDate: TODAY,
-    createdAt: `${TODAY}T08:30:00Z`,
-    medicines: [
-      { medicine: 'Telmisartan 40 mg', dosage: '1 tablet in morning', days: '30' },
-      { medicine: 'Metformin 500 mg', dosage: '1 tablet after dinner', days: '30' },
-      { medicine: 'Aspirin 75 mg', dosage: '1 tablet after lunch', days: '30' }
-    ],
-    opdCharge: 300,
-    opdPaid: 300,
-    opdRemaining: 0,
-    reportName: 'Blood Sugar (Fasting & PP)',
-    reportCharge: 250,
-    reportPaid: 250,
-    reportRemaining: 0,
-    payments: [
-      { id: 'PAY-101-1', date: TODAY, amount: 300, type: 'opd', note: 'Cash at counter' },
-      { id: 'PAY-101-2', date: TODAY, amount: 250, type: 'report', note: 'UPI payment' }
-    ]
-  },
-  {
-    id: 'NK-2026-102',
-    token: 2,
-    name: 'Kavita Desai',
-    age: 34,
-    gender: 'Female',
-    phone: '9898045678',
-    weight: '54',
-    bp: '118/78',
-    pulse: '82',
-    temp: '101.2',
-    complaints: 'High fever, body ache and severe headache for 2 days',
-    diagnosis: 'Acute Viral Fever',
-    address: 'B-302 Prerna Apartment, Satellite, Ahmedabad',
-    visitDate: TODAY,
-    createdAt: `${TODAY}T09:15:00Z`,
-    medicines: [
-      { medicine: 'Paracetamol 650 mg', dosage: '1 tablet thrice a day after food', days: '3' },
-      { medicine: 'Pantoprazole 40 mg', dosage: '1 tablet morning empty stomach', days: '5' }
-    ],
-    opdCharge: 300,
-    opdPaid: 0,
-    opdRemaining: 300,
-    reportName: 'Complete Blood Count (CBC)',
-    reportCharge: 350,
-    reportPaid: 0,
-    reportRemaining: 350,
-    payments: []
-  },
-  {
-    id: 'NK-2026-103',
-    token: 3,
-    name: 'Hitesh Shah',
-    age: 45,
-    gender: 'Male',
-    phone: '9824098765',
-    weight: '74',
-    bp: '124/82',
-    pulse: '78',
-    temp: '99.1',
-    complaints: 'Dry cough with throat congestion for 4 days',
-    diagnosis: 'Acute Bronchitis',
-    address: '42 Vallabh Park, Maninagar, Ahmedabad',
-    visitDate: TODAY,
-    createdAt: `${TODAY}T09:45:00Z`,
-    medicines: [
-      { medicine: 'Amoxicillin 500 mg', dosage: '1 capsule twice daily after meals', days: '5' },
-      { medicine: 'Cetirizine 10 mg', dosage: '1 tablet at night', days: '5' }
-    ],
-    opdCharge: 300,
-    opdPaid: 300,
-    opdRemaining: 0,
-    reportName: 'Chest X-Ray',
-    reportCharge: 400,
-    reportPaid: 200,
-    reportRemaining: 200,
-    payments: [
-      { id: 'PAY-103-1', date: TODAY, amount: 300, type: 'opd', note: 'Cash' },
-      { id: 'PAY-103-2', date: TODAY, amount: 200, type: 'report', note: 'Advance paid' }
-    ]
-  }
-];
-
-function getStoredPatients() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(INITIAL_PATIENTS));
-      return [...INITIAL_PATIENTS];
+// 1. Request Interceptor: Attach JWT Bearer token to every outgoing request
+api.interceptors.request.use(
+  (config) => {
+    const token = getAuthToken();
+    if (token) {
+      config.headers.Authorization = `Bearer ${token}`;
     }
-    return JSON.parse(raw);
-  } catch {
-    return [...INITIAL_PATIENTS];
-  }
-}
+    return config;
+  },
+  (error) => Promise.reject(error)
+);
 
-function saveStoredPatients(patients) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(patients));
-  } catch (e) {
-    console.error('Failed to write to localStorage', e);
-  }
-}
+// 2. Response Interceptor: Catch 401 Unauthorized, clear storage, and redirect to /login
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response && error.response.status === 401) {
+      try {
+        localStorage.removeItem(AUTH_KEY);
+      } catch {}
 
-const delay = (ms = 50) => new Promise(resolve => setTimeout(resolve, ms));
+      if (typeof window !== 'undefined' && !window.location.pathname.includes('/login')) {
+        window.location.href = '/login';
+      }
+    }
+    return Promise.reject(error);
+  }
+);
+
+// Normalization helper for patient documents
+function normalizePatient(p, idx = 0) {
+  if (!p) return null;
+  const id = p.id || p._id;
+  const visitDateStr = p.visitDate
+    ? (typeof p.visitDate === 'string' ? p.visitDate.slice(0, 10) : new Date(p.visitDate).toISOString().slice(0, 10))
+    : new Date().toISOString().slice(0, 10);
+
+  const opdCharge = Number(p.opdCharge) || 0;
+  const opdPaid = Number(p.opdPaid) || 0;
+  const opdRemaining = p.opdRemaining !== undefined
+    ? Number(p.opdRemaining)
+    : Math.max(0, opdCharge - opdPaid);
+
+  const reportCharge = Number(p.reportCharge) || 0;
+  const reportPaid = Number(p.reportPaid) || 0;
+  const reportRemaining = p.reportRemaining !== undefined
+    ? Number(p.reportRemaining)
+    : Math.max(0, reportCharge - reportPaid);
+
+  return {
+    ...p,
+    id: String(id),
+    _id: String(id),
+    token: p.token || idx + 1,
+    visitDate: visitDateStr,
+    opdCharge,
+    opdPaid,
+    opdRemaining,
+    reportName: p.reportName || '',
+    reportCharge,
+    reportPaid,
+    reportRemaining,
+    totalRemaining: opdRemaining + reportRemaining,
+    medicines: (p.medicines || []).map(m => ({
+      name: m.name || m.medicine || '',
+      medicine: m.medicine || m.name || '',
+      dosage: m.dosage || '',
+      days: m.days || ''
+    }))
+  };
+}
 
 /**
  * 1. login
  */
 export async function login(email, password) {
   try {
-    const res = await fetch(`${API_BASE}/auth/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password })
-    });
-
-    if (res.ok) {
-      const data = await res.json();
-      const sessionData = {
-        user: {
-          id: 'usr-jignesh-1',
-          name: data.name || 'Dr. Jignesh Chauhan',
-          email: email.toLowerCase().trim(),
-          role: 'admin',
-          qualification: 'B.A.M.S.'
-        },
-        token: data.token
-      };
-      localStorage.setItem(AUTH_KEY, JSON.stringify(sessionData));
-      return sessionData;
-    } else {
-      const errData = await res.json().catch(() => ({}));
-      throw new Error(errData.error || 'Email or password is wrong.');
-    }
+    const res = await api.post('/auth/login', { email, password });
+    const data = res.data;
+    const sessionData = {
+      user: {
+        id: 'usr-jignesh-1',
+        name: data.name || 'Dr. Jignesh Chauhan',
+        email: email.toLowerCase().trim(),
+        role: 'admin',
+        qualification: 'B.A.M.S.'
+      },
+      token: data.token
+    };
+    localStorage.setItem(AUTH_KEY, JSON.stringify(sessionData));
+    return sessionData;
   } catch (err) {
-    if (err.message === 'Email or password is wrong.' || (err.message && err.message.includes('Too many attempts'))) {
-      throw err;
-    }
-    // Offline fallback for demo
-    await delay(100);
-    if (email.toLowerCase().trim() === 'admin@nilkanth.in' && password === 'admin') {
-      const sessionData = {
-        user: {
-          id: 'usr-jignesh-1',
-          name: 'Dr. Jignesh Chauhan',
-          email: 'admin@nilkanth.in',
-          role: 'admin',
-          qualification: 'B.A.M.S.'
-        },
-        token: `nk_local_token_${Date.now()}`
-      };
-      localStorage.setItem(AUTH_KEY, JSON.stringify(sessionData));
-      return sessionData;
-    }
-    throw new Error('Email or password is wrong.');
+    const msg = err.response?.data?.error || err.message || 'Email or password is wrong.';
+    throw new Error(msg);
   }
 }
 
+/**
+ * getCurrentUser
+ */
 export function getCurrentUser() {
   try {
     const raw = localStorage.getItem(AUTH_KEY);
     if (!raw) return null;
     const session = JSON.parse(raw);
-    return session.user;
+    return session.user || null;
   } catch {
     return null;
   }
 }
 
+/**
+ * logout
+ */
 export function logout() {
   try {
     localStorage.removeItem(AUTH_KEY);
@@ -226,397 +164,247 @@ export async function createPatient(patientData) {
     throw new Error('Paid amount cannot be more than the charge.');
   }
 
-  const token = getAuthToken();
-  if (token) {
-    try {
-      const payload = {
-        name: patientData.name,
-        age: Number(patientData.age) || null,
-        phone: phoneClean,
-        weight: patientData.weight,
-        address: patientData.address,
-        medicines: (patientData.medicines || [])
-          .filter(m => (m.medicine || m.name || '').trim() !== '')
-          .map(m => ({
-            name: m.medicine || m.name,
-            dosage: m.dosage || '',
-            days: m.days || ''
-          })),
-        opdCharge,
-        opdPaid,
-        reportName: patientData.reportName || '',
-        reportCharge,
-        reportPaid,
-        visitDate: patientData.visitDate || new Date().toISOString()
-      };
-
-      const res = await fetch(`${API_BASE}/patients`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify(payload)
-      });
-
-      if (res.ok) {
-        const p = await res.json();
-        return {
-          ...p,
-          id: p.id || p._id,
-          token: p.token || Math.floor(Math.random() * 20) + 1,
-          medicines: (p.medicines || []).map(m => ({
-            medicine: m.name || m.medicine,
-            dosage: m.dosage,
-            days: m.days
-          }))
-        };
-      } else {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || 'Could not save. Check the internet and try again. Your entry is still on the screen.');
-      }
-    } catch (e) {
-      if (e.message && !e.message.includes('fetch')) {
-        throw e;
-      }
-    }
-  }
-
-  // Local fallback
-  await delay(120);
-  const opdRemaining = Math.max(0, opdCharge - opdPaid);
-  const reportRemaining = Math.max(0, reportCharge - reportPaid);
-  const patients = getStoredPatients();
-  const nextNum = 100 + patients.length + 1;
-  const year = new Date().getFullYear();
-  const id = `NK-${year}-${nextNum}`;
-  const nowIso = new Date().toISOString();
-  const todayStr = nowIso.slice(0, 10);
-
-  const newPatient = {
-    id,
-    token: patients.length + 1,
-    name: (patientData.name || '').trim(),
+  const payload = {
+    name: patientData.name,
     age: Number(patientData.age) || null,
-    gender: patientData.gender || 'Male',
     phone: phoneClean,
-    weight: (patientData.weight || '').trim(),
-    bp: (patientData.bp || '').trim(),
-    pulse: (patientData.pulse || '').trim(),
-    temp: (patientData.temp || '').trim(),
-    complaints: (patientData.complaints || '').trim(),
-    diagnosis: (patientData.diagnosis || '').trim(),
-    address: (patientData.address || '').trim(),
-    visitDate: patientData.visitDate || todayStr,
-    createdAt: nowIso,
-    medicines: Array.isArray(patientData.medicines)
-      ? patientData.medicines.filter(m => (m.medicine || '').trim() !== '')
-      : [],
+    weight: patientData.weight || '',
+    address: patientData.address || '',
+    medicines: (patientData.medicines || [])
+      .filter(m => (m.medicine || m.name || '').trim() !== '')
+      .map(m => ({
+        name: m.medicine || m.name,
+        dosage: m.dosage || '',
+        days: m.days || ''
+      })),
     opdCharge,
     opdPaid,
-    opdRemaining,
-    reportName: (patientData.reportName || '').trim(),
+    reportName: patientData.reportName || '',
     reportCharge,
     reportPaid,
-    reportRemaining,
-    payments: opdPaid > 0 ? [{ id: `PAY-${Date.now()}`, date: todayStr, amount: opdPaid, type: 'opd' }] : []
+    visitDate: patientData.visitDate || new Date().toISOString()
   };
 
-  patients.unshift(newPatient);
-  saveStoredPatients(patients);
-  return newPatient;
+  try {
+    const res = await api.post('/patients', payload);
+    return normalizePatient(res.data);
+  } catch (err) {
+    const msg = err.response?.data?.error || err.message || 'Could not save. Check the internet and try again. Your entry is still on the screen.';
+    throw new Error(msg);
+  }
 }
 
 /**
  * 3. listPatients
  */
 export async function listPatients(params = {}) {
-  const token = getAuthToken();
-  if (token) {
-    try {
-      const q = new URLSearchParams(params).toString();
-      const res = await fetch(`${API_BASE}/patients?${q}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (res.ok) {
-        const data = await res.json();
-        const normalized = data.patients.map((p, idx) => ({
-          ...p,
-          id: p.id || p._id || `NK-${idx + 101}`,
-          token: p.token || idx + 1,
-          visitDate: p.visitDate ? p.visitDate.slice(0, 10) : TODAY,
-          medicines: (p.medicines || []).map(m => ({
-            medicine: m.name || m.medicine,
-            dosage: m.dosage,
-            days: m.days
-          }))
-        }));
-        return {
-          ...data,
-          patients: normalized
-        };
-      }
-    } catch (e) {
-      // fallback
-    }
+  try {
+    const res = await api.get('/patients', { params });
+    const data = res.data;
+    const normalized = (data.patients || []).map((p, idx) => normalizePatient(p, idx));
+
+    return {
+      patients: normalized,
+      total: data.total || normalized.length,
+      page: data.page || 1,
+      limit: data.limit || 12,
+      totalPages: data.totalPages || 1
+    };
+  } catch (err) {
+    const msg = err.response?.data?.error || err.message || 'Could not load patient list.';
+    throw new Error(msg);
   }
-
-  // Local fallback
-  await delay(80);
-  const { search = '', date = '', page = 1, limit = 12 } = params;
-  let list = getStoredPatients();
-
-  if (search.trim()) {
-    const q = search.trim().toLowerCase();
-    list = list.filter(p =>
-      p.name.toLowerCase().includes(q) ||
-      p.phone.includes(q) ||
-      p.id.toLowerCase().includes(q) ||
-      (p.diagnosis && p.diagnosis.toLowerCase().includes(q)) ||
-      (p.address && p.address.toLowerCase().includes(q))
-    );
-  }
-
-  if (date) {
-    list = list.filter(p => p.visitDate === date);
-  }
-
-  const total = list.length;
-  const pageNum = Math.max(1, parseInt(page, 10) || 1);
-  const pageSize = Math.max(1, parseInt(limit, 10) || 12);
-  const totalPages = Math.ceil(total / pageSize) || 1;
-  const startIndex = (pageNum - 1) * pageSize;
-  const patients = list.slice(startIndex, startIndex + pageSize);
-
-  return { patients, total, page: pageNum, limit: pageSize, totalPages };
 }
 
 /**
  * 4. getPatient
  */
 export async function getPatient(id) {
-  const token = getAuthToken();
-  if (token) {
-    try {
-      const res = await fetch(`${API_BASE}/patients/${id}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (res.ok) {
-        const p = await res.json();
-        return {
-          ...p,
-          id: p.id || p._id,
-          token: p.token || 1,
-          visitDate: p.visitDate ? p.visitDate.slice(0, 10) : TODAY,
-          medicines: (p.medicines || []).map(m => ({
-            medicine: m.name || m.medicine,
-            dosage: m.dosage,
-            days: m.days
-          }))
-        };
-      }
-    } catch (e) {}
+  try {
+    const res = await api.get(`/patients/${id}`);
+    const normalized = normalizePatient(res.data);
+    return {
+      ...normalized,
+      payments: res.data.payments || []
+    };
+  } catch (err) {
+    const msg = err.response?.data?.error || err.message || 'Patient record not found.';
+    throw new Error(msg);
   }
-
-  await delay(50);
-  const patients = getStoredPatients();
-  const p = patients.find(p => p.id === id || p._id === id);
-  if (!p) throw new Error('Patient record not found.');
-  return { ...p };
 }
 
 /**
  * 5. addPayment
  */
 export async function addPayment(patientId, paymentData) {
-  const token = getAuthToken();
-  if (token) {
-    try {
-      const res = await fetch(`${API_BASE}/patients/${patientId}/payments`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify(paymentData)
-      });
-      if (res.ok) {
-        return await res.json();
-      } else {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || 'Payment recording failed');
-      }
-    } catch (e) {
-      if (e.message && !e.message.includes('fetch')) throw e;
-    }
+  try {
+    const res = await api.post(`/patients/${patientId}/payments`, paymentData);
+    const data = res.data;
+    return {
+      patient: normalizePatient(data.patient),
+      payment: data.payment
+    };
+  } catch (err) {
+    const msg = err.response?.data?.error || err.message || 'Payment recording failed.';
+    throw new Error(msg);
   }
-
-  await delay(80);
-  const patients = getStoredPatients();
-  const index = patients.findIndex(p => p.id === patientId || p._id === patientId);
-  if (index === -1) throw new Error('Patient not found.');
-
-  const patient = { ...patients[index] };
-  const amount = Number(paymentData.amount) || 0;
-  const type = paymentData.type === 'report' ? 'report' : 'opd';
-
-  if (amount <= 0) throw new Error('Enter a valid payment amount.');
-
-  if (type === 'opd') {
-    if (amount > patient.opdRemaining) throw new Error('Paid amount cannot be more than the charge.');
-    patient.opdPaid += amount;
-    patient.opdRemaining = Math.max(0, patient.opdCharge - patient.opdPaid);
-  } else {
-    if (amount > patient.reportRemaining) throw new Error('Paid amount cannot be more than the charge.');
-    patient.reportPaid += amount;
-    patient.reportRemaining = Math.max(0, patient.reportCharge - patient.reportPaid);
-  }
-
-  const newPayment = {
-    id: `PAY-${Date.now()}`,
-    date: new Date().toISOString().slice(0, 10),
-    amount,
-    type,
-    note: paymentData.note || 'Payment recorded'
-  };
-
-  patient.payments = [...(patient.payments || []), newPayment];
-  patients[index] = patient;
-  saveStoredPatients(patients);
-
-  return { patient, payment: newPayment };
 }
 
 /**
  * 6. reportOpd
  */
 export async function reportOpd(params = {}) {
-  const token = getAuthToken();
-  if (token) {
-    try {
-      const q = new URLSearchParams(params).toString();
-      const res = await fetch(`${API_BASE}/reports/opd?${q}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (res.ok) return await res.json();
-    } catch (e) {}
-  }
+  try {
+    const res = await api.get('/reports/opd', { params });
+    const data = res.data;
+    const normalizedItems = (data.patients || data.items || []).map((p, idx) => ({
+      patientId: p.patientId || p.id || p._id,
+      id: p.id || p._id,
+      token: p.token || idx + 1,
+      patientName: p.patientName || p.name,
+      name: p.name || p.patientName,
+      phone: p.phone,
+      date: p.visitDate ? (typeof p.visitDate === 'string' ? p.visitDate.slice(0, 10) : new Date(p.visitDate).toISOString().slice(0, 10)) : '',
+      charge: p.opdCharge !== undefined ? p.opdCharge : (p.charge || 0),
+      paid: p.opdPaid !== undefined ? p.opdPaid : (p.paid || 0),
+      remaining: p.opdRemaining !== undefined ? p.opdRemaining : (p.remaining || 0),
+      opdCharge: p.opdCharge !== undefined ? p.opdCharge : (p.charge || 0),
+      opdPaid: p.opdPaid !== undefined ? p.opdPaid : (p.paid || 0),
+      opdRemaining: p.opdRemaining !== undefined ? p.opdRemaining : (p.remaining || 0),
+      status: p.status || ((p.opdRemaining || p.remaining) === 0 ? 'Settled' : ((p.opdPaid || p.paid) > 0 ? 'Partial' : 'Pending'))
+    }));
 
-  await delay(50);
-  const list = getStoredPatients();
-  const items = list.map(p => ({
-    patientId: p.id,
-    token: p.token,
-    patientName: p.name,
-    phone: p.phone,
-    date: p.visitDate,
-    charge: p.opdCharge,
-    paid: p.opdPaid,
-    remaining: p.opdRemaining,
-    status: p.opdRemaining === 0 ? 'Settled' : (p.opdPaid > 0 ? 'Partial' : 'Pending')
-  }));
-  const totals = items.reduce((acc, c) => ({
-    charge: acc.charge + c.charge,
-    paid: acc.paid + c.paid,
-    remaining: acc.remaining + c.remaining
-  }), { charge: 0, paid: 0, remaining: 0 });
-  return { date: params.date || 'All records', items, totals };
+    const totals = {
+      charge: data.totals?.charge !== undefined ? data.totals.charge : (data.totals?.opdCharge || 0),
+      paid: data.totals?.paid !== undefined ? data.totals.paid : (data.totals?.opdPaid || 0),
+      remaining: data.totals?.remaining !== undefined ? data.totals.remaining : (data.totals?.opdRemaining || 0),
+      opdCharge: data.totals?.opdCharge || data.totals?.charge || 0,
+      opdPaid: data.totals?.opdPaid || data.totals?.paid || 0,
+      opdRemaining: data.totals?.opdRemaining || data.totals?.remaining || 0
+    };
+
+    return {
+      date: params.date || params.from || 'All records',
+      items: normalizedItems,
+      patients: normalizedItems,
+      totals
+    };
+  } catch (err) {
+    const msg = err.response?.data?.error || err.message || 'Could not load report data.';
+    throw new Error(msg);
+  }
 }
 
 /**
  * 7. reportCharge
  */
 export async function reportCharge(params = {}) {
-  const token = getAuthToken();
-  if (token) {
-    try {
-      const q = new URLSearchParams(params).toString();
-      const res = await fetch(`${API_BASE}/reports/charge?${q}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (res.ok) return await res.json();
-    } catch (e) {}
-  }
+  try {
+    // Call /reports/report-charge
+    const res = await api.get('/reports/report-charge', { params });
+    const data = res.data;
+    const normalizedItems = (data.patients || data.items || []).map((p, idx) => ({
+      patientId: p.patientId || p.id || p._id,
+      id: p.id || p._id,
+      token: p.token || idx + 1,
+      patientName: p.patientName || p.name,
+      name: p.name || p.patientName,
+      reportName: p.reportName || 'Diagnostic Report',
+      phone: p.phone,
+      date: p.visitDate ? (typeof p.visitDate === 'string' ? p.visitDate.slice(0, 10) : new Date(p.visitDate).toISOString().slice(0, 10)) : '',
+      charge: p.reportCharge !== undefined ? p.reportCharge : (p.charge || 0),
+      paid: p.reportPaid !== undefined ? p.reportPaid : (p.paid || 0),
+      remaining: p.reportRemaining !== undefined ? p.reportRemaining : (p.remaining || 0),
+      reportCharge: p.reportCharge !== undefined ? p.reportCharge : (p.charge || 0),
+      reportPaid: p.reportPaid !== undefined ? p.reportPaid : (p.paid || 0),
+      reportRemaining: p.reportRemaining !== undefined ? p.reportRemaining : (p.remaining || 0),
+      status: p.status || ((p.reportRemaining || p.remaining) === 0 ? 'Settled' : ((p.reportPaid || p.paid) > 0 ? 'Partial' : 'Pending'))
+    }));
 
-  await delay(50);
-  const list = getStoredPatients();
-  const items = list.filter(p => p.reportCharge > 0 || p.reportName).map(p => ({
-    patientId: p.id,
-    token: p.token,
-    patientName: p.name,
-    reportName: p.reportName || 'Diagnostic Report',
-    phone: p.phone,
-    date: p.visitDate,
-    charge: p.reportCharge,
-    paid: p.reportPaid,
-    remaining: p.reportRemaining,
-    status: p.reportRemaining === 0 ? 'Settled' : (p.reportPaid > 0 ? 'Partial' : 'Pending')
-  }));
-  const totals = items.reduce((acc, c) => ({
-    charge: acc.charge + c.charge,
-    paid: acc.paid + c.paid,
-    remaining: acc.remaining + c.remaining
-  }), { charge: 0, paid: 0, remaining: 0 });
-  return { date: params.date || 'All records', items, totals };
+    const totals = {
+      charge: data.totals?.charge !== undefined ? data.totals.charge : (data.totals?.reportCharge || 0),
+      paid: data.totals?.paid !== undefined ? data.totals.paid : (data.totals?.reportPaid || 0),
+      remaining: data.totals?.remaining !== undefined ? data.totals.remaining : (data.totals?.reportRemaining || 0),
+      reportCharge: data.totals?.reportCharge || data.totals?.charge || 0,
+      reportPaid: data.totals?.reportPaid || data.totals?.paid || 0,
+      reportRemaining: data.totals?.reportRemaining || data.totals?.remaining || 0
+    };
+
+    return {
+      date: params.date || params.from || 'All records',
+      items: normalizedItems,
+      patients: normalizedItems,
+      totals
+    };
+  } catch (err) {
+    const msg = err.response?.data?.error || err.message || 'Could not load report data.';
+    throw new Error(msg);
+  }
 }
 
 /**
  * 8. reportCombined
  */
 export async function reportCombined(params = {}) {
-  const token = getAuthToken();
-  if (token) {
-    try {
-      const q = new URLSearchParams(params).toString();
-      const res = await fetch(`${API_BASE}/reports/combined?${q}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      if (res.ok) return await res.json();
-    } catch (e) {}
-  }
-
-  await delay(50);
-  const list = getStoredPatients();
-  const items = list.map(p => {
-    const totalCharge = p.opdCharge + p.reportCharge;
-    const totalPaid = p.opdPaid + p.reportPaid;
-    const totalRemaining = p.opdRemaining + p.reportRemaining;
-    return {
-      patientId: p.id,
-      token: p.token,
-      patientName: p.name,
-      phone: p.phone,
-      date: p.visitDate,
-      opdCharge: p.opdCharge,
-      opdPaid: p.opdPaid,
-      opdRemaining: p.opdRemaining,
-      reportCharge: p.reportCharge,
-      reportPaid: p.reportPaid,
-      reportRemaining: p.reportRemaining,
-      totalCharge,
-      totalPaid,
-      totalRemaining,
-      status: totalRemaining === 0 ? 'Settled' : (totalPaid > 0 ? 'Partial' : 'Pending')
+  try {
+    const res = await api.get('/reports/combined', { params });
+    const data = res.data;
+    const dates = data.dates || [];
+    const grandTotal = data.grandTotal || data.totals || {
+      patientCount: 0,
+      opdCharge: 0,
+      reportCharge: 0,
+      totalPaid: 0,
+      totalRemaining: 0,
+      totalCharge: 0
     };
-  });
-  const totals = items.reduce((acc, c) => ({
-    opdCharge: acc.opdCharge + c.opdCharge,
-    opdPaid: acc.opdPaid + c.opdPaid,
-    opdRemaining: acc.opdRemaining + c.opdRemaining,
-    reportCharge: acc.reportCharge + c.reportCharge,
-    reportPaid: acc.reportPaid + c.reportPaid,
-    reportRemaining: acc.reportRemaining + c.reportRemaining,
-    charge: acc.charge + c.totalCharge,
-    paid: acc.paid + c.totalPaid,
-    remaining: acc.remaining + c.totalRemaining
-  }), {
-    opdCharge: 0, opdPaid: 0, opdRemaining: 0,
-    reportCharge: 0, reportPaid: 0, reportRemaining: 0,
-    charge: 0, paid: 0, remaining: 0
-  });
-  return { date: params.date || 'All records', items, totals };
+
+    // Format rows for table view
+    const items = dates.map((d, idx) => ({
+      ...d,
+      token: idx + 1,
+      patientName: d.date ? `${d.patientCount} patients on ${d.date}` : '',
+      date: d.date,
+      charge: d.totalCharge || ((d.opdCharge || 0) + (d.reportCharge || 0)),
+      paid: d.totalPaid || 0,
+      remaining: d.totalRemaining || 0,
+      status: (d.totalRemaining || 0) === 0 ? 'Settled' : ((d.totalPaid || 0) > 0 ? 'Partial' : 'Pending')
+    }));
+
+    return {
+      date: params.date || params.from || 'All records',
+      items,
+      dates,
+      grandTotal,
+      totals: {
+        ...grandTotal,
+        charge: grandTotal.totalCharge || ((grandTotal.opdCharge || 0) + (grandTotal.reportCharge || 0)),
+        paid: grandTotal.totalPaid || 0,
+        remaining: grandTotal.totalRemaining || 0
+      },
+      rows: data.rows || items
+    };
+  } catch (err) {
+    const msg = err.response?.data?.error || err.message || 'Could not load report data.';
+    throw new Error(msg);
+  }
 }
 
 export function resetMockData() {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(INITIAL_PATIENTS));
+  // Real API active - mock reset is no-op
 }
+
+export default {
+  api,
+  login,
+  getCurrentUser,
+  logout,
+  createPatient,
+  listPatients,
+  getPatient,
+  addPayment,
+  reportOpd,
+  reportCharge,
+  reportCombined,
+  resetMockData
+};

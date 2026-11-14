@@ -25,7 +25,7 @@ export function Login() {
       showToast('Signed in successfully');
       navigate('/patients');
     } catch (err) {
-      setError('Email or password is wrong.');
+      setError(err.message || 'Email or password is wrong.');
     } finally {
       setLoading(false);
     }
