@@ -3,7 +3,7 @@ import mongoose from 'mongoose';
 export async function connectDB() {
   try {
     await mongoose.connect(process.env.MONGODB_URI, {
-      serverSelectionTimeoutMS: 5000
+      serverSelectionTimeoutMS: 15000
     });
     return mongoose.connection;
   } catch (error) {

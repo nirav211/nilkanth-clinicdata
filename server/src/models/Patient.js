@@ -131,6 +131,10 @@ patientSchema.index({ visitDate: 1 });
 patientSchema.index({ phone: 1 });
 patientSchema.index({ name: 1 });
 
+// High-performance compound indexes for reports aggregation (75,000+ patients/year)
+patientSchema.index({ isDeleted: 1, visitDate: -1 });
+patientSchema.index({ isDeleted: 1, reportCharge: 1, visitDate: -1 });
+
 // Virtuals
 patientSchema.virtual('opdRemaining').get(function () {
   const charge = typeof this.opdCharge === 'number' ? this.opdCharge : 0;
