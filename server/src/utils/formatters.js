@@ -40,3 +40,4 @@ export function calculateDaysPending(visitDate, asOfDate = new Date()) {
   const diffTime = d2.getTime() - d1.getTime();
   return Math.max(0, Math.floor(diffTime / (1000 * 60 * 60 * 24)));
 }
+
